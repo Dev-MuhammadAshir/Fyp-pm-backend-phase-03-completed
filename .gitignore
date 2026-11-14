@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+
+# Environment (NEVER commit — contains JWT secrets, DB password)
+.env
+.env.local
+.env.*.local
+
+# Build output
+dist/
+build/
+coverage/
+
+# Logs
+*.log
+logs/
+
+# Uploads (local file storage during dev)
+uploads/
+
+# Bun lockfile (we use npm — package-lock.json is committed instead)
+bun.lock
+
+# Frontend files (this is a backend-only repo)
+index.html
+vite.config.ts
+metadata.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Prisma local artifacts
+prisma/*.db

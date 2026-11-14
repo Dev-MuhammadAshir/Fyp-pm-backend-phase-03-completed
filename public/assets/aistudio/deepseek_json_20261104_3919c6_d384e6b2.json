@@ -1,0 +1,2126 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Real-Time Team Project Management Platform with Predictive Insights",
+    "version": "3.0.0",
+    "summary": "FYP SRS v3.0 — design-ready API baseline",
+    "description": "REST API for the Real-Time Team Project Management Platform. Implements authentication, RBAC, team/project/task management, Kanban workflow, dependencies, collaboration, notifications, attachments, analytics, append-only audit trail, and rule-based PIRAE risk insights.\n\n**Auth:** Access JWT (15 min) + Redis refresh session + JTI blacklist. Logout accepts a `refreshToken` body so an expired access token does not block refresh revocation (Errata E-007 / G-20).\n\n**Status enums:** task = [TODO, IN_PROGRESS, DONE]; priority = [LOW, MEDIUM, HIGH, CRITICAL]; global role = [Administrator, Project Manager, Team Member, Viewer]; team role = [Admin-Assigned, Member]; project role = [Manager, Contributor, Viewer].\n\n**Rate limit:** 100 requests / 15 min / authenticated user.\n\n**PIRAE:** Advisory only — never autonomously mutates project state.",
+    "contact": {
+      "name": "FYP Team 2K23/SWEE/21"
+    },
+    "license": {
+      "name": "Academic FYP - University of Sindh"
+    }
+  },
+  "servers": [
+    { "url": "https://api.fyp.local/api/v1", "description": "Production (Docker Compose + Nginx)" },
+    { "url": "http://localhost:3000/api/v1", "description": "Local development" }
+  ],
+  "tags": [
+    { "name": "Auth", "description": "Authentication, session, token lifecycle (UC-01, FR-AUTH-01..12)" },
+    { "name": "Users", "description": "User administration and profiles (UC-02, UC-03, FR-AUTH-06..09)" },
+    { "name": "Teams", "description": "Team and membership management (UC-04, FR-TEAM-01..05)" },
+    { "name": "Projects", "description": "Project lifecycle and members (UC-05, UC-06, FR-PROJ-01..07)" },
+    { "name": "Tasks", "description": "Task CRUD, assignment, subtasks (UC-07, UC-17, FR-TASK-01..16)" },
+    { "name": "Kanban", "description": "Kanban workflow and status transitions (UC-08, FR-KAN-01..05)" },
+    { "name": "Dependencies", "description": "Task dependency graph (UC-09, FR-TASK-07, FR-TASK-15)" },
+    { "name": "Comments", "description": "Comments, mentions, 15-minute edit window (UC-11, FR-COMM-01..05)" },
+    { "name": "Notifications", "description": "Persistent + real-time notifications, preferences (UC-12, FR-NOTIF-01..04)" },
+    { "name": "Attachments", "description": "Controlled file uploads (UC-13, FR-ATT-01..05)" },
+    { "name": "Analytics", "description": "Project and workload analytics (UC-14, FR-AN-01..10)" },
+    { "name": "Audit", "description": "Append-only audit trail (UC-15, FR-AUD-01..06)" },
+    { "name": "PIRAE", "description": "Predictive Insights & Risk Analytics Engine (UC-16, FR-PIRAE-01..08) — advisory only" }
+  ],
+  "security": [{ "bearerAuth": [] }],
+  "paths": {
+    "/auth/login": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "Authenticate user and issue tokens",
+        "operationId": "authLogin",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LoginRequest" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessResponse" },
+                    { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/TokenPair" } } }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "423": { "description": "Account locked (5 failed attempts / 15 min — NFR-SEC-06)" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/auth/refresh": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "Exchange refresh token for a new access token",
+        "operationId": "authRefresh",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["refreshToken"],
+                "properties": { "refreshToken": { "type": "string", "minLength": 32 } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "New access token issued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessResponse" },
+                    { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/TokenPair" } } }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/auth/logout": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "Logout: blacklist access JTI + revoke refresh session",
+        "description": "Per AC-AUTH-11 and Errata E-007 / G-20: accepts the `refreshToken` in the body so that logout succeeds even when the access token has expired. If a valid access token is also presented, its JTI is additionally blacklisted.",
+        "operationId": "authLogout",
+        "security": [{ "bearerAuth": [] }, {}],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LogoutRequest" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Session revoked (refresh token removed from Redis; access JTI blacklisted if present)",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NoContentSuccess" } } }
+          },
+          "422": { "$ref": "#/components/responses/ValidationError" }
+        }
+      }
+    },
+    "/auth/me": {
+      "get": {
+        "tags": ["Auth"],
+        "summary": "Get current authenticated user",
+        "operationId": "authMe",
+        "responses": {
+          "200": {
+            "description": "Current user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessResponse" },
+                    { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/User" } } }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      },
+      "patch": {
+        "tags": ["Auth"],
+        "summary": "Update own profile (FR-AUTH-06)",
+        "description": "Updates the current user's full name and/or configured capacity. Email change is out of scope for MVP.",
+        "operationId": "authUpdateProfile",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UpdateProfileRequest" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessResponse" },
+                    { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/User" } } }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/auth/password": {
+      "patch": {
+        "tags": ["Auth"],
+        "summary": "Change own password (revokes all refresh sessions)",
+        "operationId": "authChangePassword",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ChangePasswordRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "Password changed; all sessions revoked", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NoContentSuccess" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/auth/register": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "Admin-provisioned account creation (FR-AUTH-05, CA-04)",
+        "description": "Requires an authenticated user with `global_role = Administrator` (FR-AUTH-09). Public self-registration is out of scope.",
+        "operationId": "authRegister",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateUserRequest" } } }
+        },
+        "responses": {
+          "201": {
+            "description": "User created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessResponse" },
+                    { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/User" } } }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/users": {
+      "get": {
+        "tags": ["Users"],
+        "summary": "List users (admin only)",
+        "operationId": "listUsers",
+        "parameters": [
+          { "$ref": "#/components/parameters/PageParam" },
+          { "$ref": "#/components/parameters/LimitParam" },
+          { "name": "search", "in": "query", "schema": { "type": "string" } },
+          { "name": "role", "in": "query", "schema": { "$ref": "#/components/schemas/GlobalRole" } },
+          { "name": "isActive", "in": "query", "schema": { "type": "boolean" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated users",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessResponse" },
+                    { "type": "object", "properties": { "data": { "type": "array", "items": { "$ref": "#/components/schemas/User" } }, "meta": { "$ref": "#/components/schemas/PaginationMeta" } } }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      },
+      "post": {
+        "tags": ["Users"],
+        "summary": "Create user (admin only)",
+        "operationId": "createUser",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateUserRequest" } } } },
+        "responses": {
+          "201": {
+            "description": "User created",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/SuccessResponse" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/User" } } }] } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/users/{userId}": {
+      "parameters": [{ "$ref": "#/components/parameters/UserIdParam" }],
+      "get": {
+        "tags": ["Users"],
+        "summary": "Get user by ID (admin only, or self)",
+        "operationId": "getUser",
+        "responses": {
+          "200": {
+            "description": "User",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/SuccessResponse" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/User" } } }] } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/users/{userId}/role": {
+      "parameters": [{ "$ref": "#/components/parameters/UserIdParam" }],
+      "patch": {
+        "tags": ["Users"],
+        "summary": "Change user global role (admin only, FR-AUTH-09)",
+        "operationId": "updateUserRole",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "type": "object", "required": ["globalRole"], "properties": { "globalRole": { "$ref": "#/components/schemas/GlobalRole" } } }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Role updated",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/SuccessResponse" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/User" } } }] } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/users/{userId}/status": {
+      "parameters": [{ "$ref": "#/components/parameters/UserIdParam" }],
+      "patch": {
+        "tags": ["Users"],
+        "summary": "Activate / deactivate user (admin only, FR-AUTH-07)",
+        "operationId": "updateUserStatus",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "type": "object", "required": ["isActive"], "properties": { "isActive": { "type": "boolean" } } }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Status updated",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/SuccessResponse" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/User" } } }] } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/teams": {
+      "get": {
+        "tags": ["Teams"],
+        "summary": "List teams visible to caller",
+        "operationId": "listTeams",
+        "parameters": [
+          { "$ref": "#/components/parameters/PageParam" },
+          { "$ref": "#/components/parameters/LimitParam" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated teams",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessResponse" },
+                    { "type": "object", "properties": { "data": { "type": "array", "items": { "$ref": "#/components/schemas/Team" } }, "meta": { "$ref": "#/components/schemas/PaginationMeta" } } }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      },
+      "post": {
+        "tags": ["Teams"],
+        "summary": "Create team (Administrator only — FR-AUTH-12 / CA-05)",
+        "operationId": "createTeam",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateTeamRequest" } } } },
+        "responses": {
+          "201": {
+            "description": "Team created",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/SuccessResponse" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Team" } } }] } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/teams/{teamId}": {
+      "parameters": [{ "$ref": "#/components/parameters/TeamIdParam" }],
+      "get": {
+        "tags": ["Teams"],
+        "summary": "Get team details",
+        "operationId": "getTeam",
+        "responses": {
+          "200": {
+            "description": "Team",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/SuccessResponse" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Team" } } }] } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      },
+      "patch": {
+        "tags": ["Teams"],
+        "summary": "Update team metadata (Admin + PM — FR-AUTH-12, Errata E-005)",
+        "operationId": "updateTeam",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UpdateTeamRequest" } } } },
+        "responses": {
+          "200": {
+            "description": "Team updated",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/SuccessResponse" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Team" } } }] } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      },
+      "delete": {
+        "tags": ["Teams"],
+        "summary": "Delete team (admin only)",
+        "operationId": "deleteTeam",
+        "responses": {
+          "200": { "description": "Team deleted", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NoContentSuccess" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/teams/{teamId}/members": {
+      "parameters": [{ "$ref": "#/components/parameters/TeamIdParam" }],
+      "get": {
+        "tags": ["Teams"],
+        "summary": "List team members",
+        "operationId": "listTeamMembers",
+        "responses": {
+          "200": {
+            "description": "Members",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessResponse" },
+                    { "type": "object", "properties": { "data": { "type": "array", "items": { "$ref": "#/components/schemas/TeamMember" } } } }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      },
+      "post": {
+        "tags": ["Teams"],
+        "summary": "Add team member (Admin + PM — FR-TEAM-02/03, CA-05)",
+        "operationId": "addTeamMember",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AddTeamMemberRequest" } } } },
+        "responses": {
+          "201": {
+            "description": "Member added",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/SuccessResponse" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/TeamMember" } } }] } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/teams/{teamId}/members/{userId}": {
+      "parameters": [{ "$ref": "#/components/parameters/TeamIdParam" }, { "$ref": "#/components/parameters/UserIdParam" }],
+      "delete": {
+        "tags": ["Teams"],
+        "summary": "Remove team member",
+        "operationId": "removeTeamMember",
+        "responses": {
+          "200": { "description": "Member removed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NoContentSuccess" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/projects": {
+      "get": {
+        "tags": ["Projects"],
+        "summary": "List projects visible to caller (FR-PROJ-05)",
+        "operationId": "listProjects",
+        "parameters": [
+          { "$ref": "#/components/parameters/PageParam" },
+          { "$ref": "#/components/parameters/LimitParam" },
+          { "name": "teamId", "in": "query", "schema": { "type": "string", "format": "uuid" } },
+          { "name": "status", "in": "query", "schema": { "$ref": "#/components/schemas/ProjectStatus" } },
+          { "name": "priority", "in": "query", "schema": { "$ref": "#/components/schemas/Priority" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated projects",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessResponse" },
+                    { "type": "object", "properties": { "data": { "type": "array", "items": { "$ref": "#/components/schemas/Project" } }, "meta": { "$ref": "#/components/schemas/PaginationMeta" } } }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      },
+      "post": {
+        "tags": ["Projects"],
+        "summary": "Create project (Admin/PM — FR-PROJ-01)",
+        "operationId": "createProject",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateProjectRequest" } } } },
+        "responses": {
+          "201": {
+            "description": "Project created",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/SuccessResponse" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Project" } } }] } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/projects/{projectId}": {
+      "parameters": [{ "$ref": "#/components/parameters/ProjectIdParam" }],
+      "get": {
+        "tags": ["Projects"],
+        "summary": "Get project by ID",
+        "operationId": "getProject",
+        "responses": {
+          "200": {
+            "description": "Project",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/SuccessResponse" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Project" } } }] } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      },
+      "patch": {
+        "tags": ["Projects"],
+        "summary": "Update project (Manager+ — FR-PROJ-02)",
+        "operationId": "updateProject",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UpdateProjectRequest" } } } },
+        "responses": {
+          "200": {
+            "description": "Project updated",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/SuccessResponse" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Project" } } }] } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      },
+      "delete": {
+        "tags": ["Projects"],
+        "summary": "Archive project (Manager+)",
+        "operationId": "archiveProject",
+        "responses": {
+          "200": { "description": "Project archived", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NoContentSuccess" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/projects/{projectId}/members": {
+      "parameters": [{ "$ref": "#/components/parameters/ProjectIdParam" }],
+      "get": {
+        "tags": ["Projects"],
+        "summary": "List project members",
+        "operationId": "listProjectMembers",
+        "responses": {
+          "200": {
+            "description": "Members",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessResponse" },
+                    { "type": "object", "properties": { "data": { "type": "array", "items": { "$ref": "#/components/schemas/ProjectMember" } } } }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      },
+      "post": {
+        "tags": ["Projects"],
+        "summary": "Add project member with role (FR-PROJ-04)",
+        "operationId": "addProjectMember",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AddProjectMemberRequest" } } } },
+        "responses": {
+          "201": {
+            "description": "Member added",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/SuccessResponse" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/ProjectMember" } } }] } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/projects/{projectId}/members/{userId}": {
+      "parameters": [{ "$ref": "#/components/parameters/ProjectIdParam" }, { "$ref": "#/components/parameters/UserIdParam" }],
+      "patch": {
+        "tags": ["Projects"],
+        "summary": "Change project member role",
+        "operationId": "updateProjectMemberRole",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UpdateProjectMemberRoleRequest" } } } },
+        "responses": {
+          "200": {
+            "description": "Role updated",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/SuccessResponse" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/ProjectMember" } } }] } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      },
+      "delete": {
+        "tags": ["Projects"],
+        "summary": "Remove project member",
+        "operationId": "removeProjectMember",
+        "responses": {
+          "200": { "description": "Member removed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NoContentSuccess" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/projects/{projectId}/progress": {
+      "parameters": [{ "$ref": "#/components/parameters/ProjectIdParam" }],
+      "get": {
+        "tags": ["Projects", "Analytics"],
+        "summary": "Project progress snapshot (FR-PROJ-05, FR-AN-01)",
+        "operationId": "getProjectProgress",
+        "responses": {
+          "200": {
+            "description": "Progress",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/SuccessResponse" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/ProjectProgress" } } }] } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/projects/{projectId}/tasks": {
+      "parameters": [{ "$ref": "#/components/parameters/ProjectIdParam" }],
+      "get": {
+        "tags": ["Tasks"],
+        "summary": "List project tasks (FR-TASK-01..09)",
+        "operationId": "listProjectTasks",
+        "parameters": [
+          { "$ref": "#/components/parameters/PageParam" },
+          { "$ref": "#/components/parameters/LimitParam" },
+          { "name": "status", "in": "query", "schema": { "$ref": "#/components/schemas/TaskStatus" } },
+          { "name": "priority", "in": "query", "schema": { "$ref": "#/components/schemas/Priority" } },
+          { "name": "assigneeId", "in": "query", "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated tasks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessResponse" },
+                    { "type": "object", "properties": { "data": { "type": "array", "items": { "$ref": "#/components/schemas/Task" } }, "meta": { "$ref": "#/components/schemas/PaginationMeta" } } }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      },
+      "post": {
+        "tags": ["Tasks"],
+        "summary": "Create task (FR-TASK-01)",
+        "description": "Defaults when omitted: status = TODO, priority = MEDIUM, estimatedEffort = 0.",
+        "operationId": "createTask",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateTaskRequest" } } } },
+        "responses": {
+          "201": {
+            "description": "Task created",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/SuccessResponse" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Task" } } }] } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/tasks/{taskId}": {
+      "parameters": [{ "$ref": "#/components/parameters/TaskIdParam" }],
+      "get": {
+        "tags": ["Tasks"],
+        "summary": "Get task by ID",
+        "operationId": "getTask",
+        "responses": {
+          "200": {
+            "description": "Task",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/SuccessResponse" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Task" } } }] } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      },
+      "patch": {
+        "tags": ["Tasks"],
+        "summary": "Update task (FR-TASK-02)",
+        "operationId": "updateTask",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UpdateTaskRequest" } } } },
+        "responses": {
+          "200": {
+            "description": "Task updated",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/SuccessResponse" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Task" } } }] } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      },
+      "delete": {
+        "tags": ["Tasks"],
+        "summary": "Delete/archive task (FR-TASK-03)",
+        "operationId": "deleteTask",
+        "responses": {
+          "200": { "description": "Task deleted", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NoContentSuccess" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/tasks/{taskId}/status": {
+      "parameters": [{ "$ref": "#/components/parameters/TaskIdParam" }],
+      "patch": {
+        "tags": ["Kanban"],
+        "summary": "Change task status — Kanban transition (FR-KAN-02, FR-TASK-15)",
+        "description": "Validates dependency completion before allowing DONE (FR-TASK-15). Triggers real-time `task.status_changed` and PIRAE re-evaluation. Rejected transitions must not leave the client showing an unaccepted state.",
+        "operationId": "updateTaskStatus",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "type": "object", "required": ["status"], "properties": { "status": { "$ref": "#/components/schemas/TaskStatus" } } }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Status updated",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/SuccessResponse" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Task" } } }] } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "description": "Blocked: open dependencies prevent transition to DONE (FR-TASK-15)" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/tasks/{taskId}/assignees": {
+      "parameters": [{ "$ref": "#/components/parameters/TaskIdParam" }],
+      "post": {
+        "tags": ["Tasks"],
+        "summary": "Assign user to task (FR-TASK-04, FR-TASK-05)",
+        "operationId": "assignTask",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AssignTaskRequest" } } } },
+        "responses": {
+          "200": {
+            "description": "Assignee added",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/SuccessResponse" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Task" } } }] } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/tasks/{taskId}/assignees/{userId}": {
+      "parameters": [{ "$ref": "#/components/parameters/TaskIdParam" }, { "$ref": "#/components/parameters/UserIdParam" }],
+      "delete": {
+        "tags": ["Tasks"],
+        "summary": "Unassign user from task",
+        "operationId": "unassignTask",
+        "responses": {
+          "200": { "description": "Assignee removed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NoContentSuccess" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/tasks/{taskId}/subtasks": {
+      "parameters": [{ "$ref": "#/components/parameters/TaskIdParam" }],
+      "post": {
+        "tags": ["Tasks"],
+        "summary": "Add subtask (FR-TASK-06 — JSONB subtask_v1)",
+        "operationId": "addSubtask",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AddSubtaskRequest" } } } },
+        "responses": {
+          "200": {
+            "description": "Subtask added; returns updated task",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/SuccessResponse" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Task" } } }] } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/tasks/{taskId}/history": {
+      "parameters": [{ "$ref": "#/components/parameters/TaskIdParam" }],
+      "get": {
+        "tags": ["Tasks", "Audit"],
+        "summary": "Task change history (FR-TASK-09)",
+        "operationId": "getTaskHistory",
+        "parameters": [
+          { "$ref": "#/components/parameters/PageParam" },
+          { "$ref": "#/components/parameters/LimitParam" }
+        ],
+        "responses": {
+          "200": {
+            "description": "History",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessResponse" },
+                    { "type": "object", "properties": { "data": { "type": "array", "items": { "$ref": "#/components/schemas/AuditLog" } }, "meta": { "$ref": "#/components/schemas/PaginationMeta" } } }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/tasks/{taskId}/dependencies": {
+      "parameters": [{ "$ref": "#/components/parameters/TaskIdParam" }],
+      "get": {
+        "tags": ["Dependencies"],
+        "summary": "List dependencies of a task (FR-TASK-07)",
+        "operationId": "listTaskDependencies",
+        "responses": {
+          "200": {
+            "description": "Dependencies",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessResponse" },
+                    { "type": "object", "properties": { "data": { "type": "array", "items": { "$ref": "#/components/schemas/TaskDependency" } } } }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      },
+      "post": {
+        "tags": ["Dependencies"],
+        "summary": "Add blocking dependency",
+        "operationId": "addTaskDependency",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["blockingTaskId"],
+                "properties": {
+                  "blockingTaskId": { "type": "string", "format": "uuid" },
+                  "type": { "type": "string", "enum": ["BLOCKS"], "default": "BLOCKS" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Dependency created",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/SuccessResponse" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/TaskDependency" } } }] } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "description": "Dependency cycle detected" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/tasks/{taskId}/dependencies/{dependencyId}": {
+      "parameters": [
+        { "$ref": "#/components/parameters/TaskIdParam" },
+        { "name": "dependencyId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+      ],
+      "delete": {
+        "tags": ["Dependencies"],
+        "summary": "Remove dependency",
+        "operationId": "removeTaskDependency",
+        "responses": {
+          "200": { "description": "Dependency removed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NoContentSuccess" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/tasks/{taskId}/attachments": {
+      "parameters": [{ "$ref": "#/components/parameters/TaskIdParam" }],
+      "get": {
+        "tags": ["Attachments"],
+        "summary": "List attachments linked to a task (G-11)",
+        "operationId": "listTaskAttachments",
+        "responses": {
+          "200": {
+            "description": "Attachments",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessResponse" },
+                    { "type": "object", "properties": { "data": { "type": "array", "items": { "$ref": "#/components/schemas/Attachment" } } } }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/tasks/{taskId}/comments": {
+      "parameters": [{ "$ref": "#/components/parameters/TaskIdParam" }],
+      "get": {
+        "tags": ["Comments"],
+        "summary": "List task comments (FR-COMM-01)",
+        "operationId": "listTaskComments",
+        "parameters": [
+          { "$ref": "#/components/parameters/PageParam" },
+          { "$ref": "#/components/parameters/LimitParam" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Comments",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessResponse" },
+                    { "type": "object", "properties": { "data": { "type": "array", "items": { "$ref": "#/components/schemas/Comment" } }, "meta": { "$ref": "#/components/schemas/PaginationMeta" } } }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      },
+      "post": {
+        "tags": ["Comments"],
+        "summary": "Add comment with optional mentions (FR-COMM-01, FR-COMM-02)",
+        "operationId": "createComment",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["body"],
+                "properties": {
+                  "body": { "type": "string", "minLength": 1, "maxLength": 5000 },
+                  "mentions": { "type": "array", "items": { "type": "string", "format": "uuid" } }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Comment created",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/SuccessResponse" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Comment" } } }] } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/comments/{commentId}": {
+      "parameters": [{ "$ref": "#/components/parameters/CommentIdParam" }],
+      "patch": {
+        "tags": ["Comments"],
+        "summary": "Edit own comment within 15 minutes (FR-COMM-03, BR-COL-02)",
+        "operationId": "updateComment",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "type": "object", "required": ["body"], "properties": { "body": { "type": "string", "minLength": 1, "maxLength": 5000 } } }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Comment updated",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/SuccessResponse" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Comment" } } }] } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "description": "Not author OR 15-minute edit window expired" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      },
+      "delete": {
+        "tags": ["Comments"],
+        "summary": "Delete comment (FR-COMM-05)",
+        "operationId": "deleteComment",
+        "responses": {
+          "200": { "description": "Comment deleted", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NoContentSuccess" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/comments/{commentId}/attachments": {
+      "parameters": [{ "$ref": "#/components/parameters/CommentIdParam" }],
+      "get": {
+        "tags": ["Attachments"],
+        "summary": "List attachments linked to a comment (G-11)",
+        "operationId": "listCommentAttachments",
+        "responses": {
+          "200": {
+            "description": "Attachments",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessResponse" },
+                    { "type": "object", "properties": { "data": { "type": "array", "items": { "$ref": "#/components/schemas/Attachment" } } } }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/notifications": {
+      "get": {
+        "tags": ["Notifications"],
+        "summary": "List notifications for current user (FR-NOTIF-02)",
+        "operationId": "listNotifications",
+        "parameters": [
+          { "$ref": "#/components/parameters/PageParam" },
+          { "$ref": "#/components/parameters/LimitParam" },
+          { "name": "unreadOnly", "in": "query", "schema": { "type": "boolean", "default": false } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Notifications",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessResponse" },
+                    { "type": "object", "properties": { "data": { "type": "array", "items": { "$ref": "#/components/schemas/Notification" } }, "meta": { "$ref": "#/components/schemas/PaginationMeta" } } }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/notifications/unread-count": {
+      "get": {
+        "tags": ["Notifications"],
+        "summary": "Unread notification count for current user (G-10)",
+        "operationId": "getUnreadNotificationCount",
+        "responses": {
+          "200": {
+            "description": "Count",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessResponse" },
+                    { "type": "object", "properties": { "data": { "type": "object", "properties": { "count": { "type": "integer", "minimum": 0 } } } } }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/notifications/{notificationId}/read": {
+      "parameters": [{ "$ref": "#/components/parameters/NotificationIdParam" }],
+      "patch": {
+        "tags": ["Notifications"],
+        "summary": "Mark notification as read",
+        "operationId": "markNotificationRead",
+        "responses": {
+          "200": {
+            "description": "Marked read",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/SuccessResponse" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Notification" } } }] } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/notifications/read-all": {
+      "patch": {
+        "tags": ["Notifications"],
+        "summary": "Mark all notifications as read",
+        "operationId": "markAllNotificationsRead",
+        "responses": {
+          "200": { "description": "All marked read", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NoContentSuccess" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/notifications/preferences": {
+      "get": {
+        "tags": ["Notifications"],
+        "summary": "Get own notification preferences (Artifact 56)",
+        "operationId": "getNotificationPreferences",
+        "responses": {
+          "200": {
+            "description": "Preferences",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/SuccessResponse" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/NotificationPreference" } } }] } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      },
+      "patch": {
+        "tags": ["Notifications"],
+        "summary": "Update own notification preferences (Artifact 56)",
+        "operationId": "updateNotificationPreferences",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UpdateNotificationPreferenceRequest" } } } },
+        "responses": {
+          "200": {
+            "description": "Preferences updated",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/SuccessResponse" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/NotificationPreference" } } }] } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/attachments": {
+      "post": {
+        "tags": ["Attachments"],
+        "summary": "Upload attachment linked to task XOR comment (FR-ATT-01..05, AC-DATA-07)",
+        "description": "Exactly one of `taskId` or `commentId` must be provided (XOR). Max 10 MB. Allowed MIME: PDF, PNG, JPEG, DOCX, XLSX, TXT (magic-byte validated). No attachment-specific Socket.IO event — invalidate/refetch on success.",
+        "operationId": "uploadAttachment",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": ["file"],
+                "properties": {
+                  "file": { "type": "string", "format": "binary" },
+                  "taskId": { "type": "string", "format": "uuid" },
+                  "commentId": { "type": "string", "format": "uuid" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Uploaded",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/SuccessResponse" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Attachment" } } }] } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "413": { "description": "File exceeds 10 MB" },
+          "415": { "description": "Unsupported MIME type or failed magic-byte check" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/attachments/{attachmentId}": {
+      "parameters": [{ "$ref": "#/components/parameters/AttachmentIdParam" }],
+      "get": {
+        "tags": ["Attachments"],
+        "summary": "Download attachment",
+        "operationId": "downloadAttachment",
+        "responses": {
+          "200": { "description": "Binary file" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      },
+      "delete": {
+        "tags": ["Attachments"],
+        "summary": "Delete attachment (FR-ATT-04)",
+        "operationId": "deleteAttachment",
+        "responses": {
+          "200": { "description": "Deleted", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NoContentSuccess" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/analytics/projects/{projectId}": {
+      "parameters": [{ "$ref": "#/components/parameters/ProjectIdParam" }],
+      "get": {
+        "tags": ["Analytics"],
+        "summary": "Project analytics (FR-AN-01..10)",
+        "operationId": "getProjectAnalytics",
+        "responses": {
+          "200": {
+            "description": "Analytics",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/SuccessResponse" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/ProjectAnalytics" } } }] } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/analytics/projects/{projectId}/workload": {
+      "parameters": [{ "$ref": "#/components/parameters/ProjectIdParam" }],
+      "get": {
+        "tags": ["Analytics"],
+        "summary": "Project workload distribution (FR-AN-05)",
+        "operationId": "getProjectWorkload",
+        "responses": {
+          "200": {
+            "description": "Workload per member",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessResponse" },
+                    { "type": "object", "properties": { "data": { "type": "array", "items": { "$ref": "#/components/schemas/WorkloadEntry" } } } }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/analytics/projects/{projectId}/overdue": {
+      "parameters": [{ "$ref": "#/components/parameters/ProjectIdParam" }],
+      "get": {
+        "tags": ["Analytics"],
+        "summary": "Overdue tasks (FR-AN-02)",
+        "operationId": "getOverdueTasks",
+        "responses": {
+          "200": {
+            "description": "Overdue tasks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessResponse" },
+                    { "type": "object", "properties": { "data": { "type": "array", "items": { "$ref": "#/components/schemas/Task" } } } }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/analytics/projects/{projectId}/trends": {
+      "parameters": [{ "$ref": "#/components/parameters/ProjectIdParam" }],
+      "get": {
+        "tags": ["Analytics"],
+        "summary": "Completion trends (FR-AN-08, G-09)",
+        "operationId": "getProjectTrends",
+        "parameters": [{ "name": "weeks", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 52, "default": 8 } }],
+        "responses": {
+          "200": {
+            "description": "Weekly completion trend",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessResponse" },
+                    { "type": "object", "properties": { "data": { "type": "array", "items": { "$ref": "#/components/schemas/ProjectSnapshot" } } } }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/analytics/projects/{projectId}/dependencies": {
+      "parameters": [{ "$ref": "#/components/parameters/ProjectIdParam" }],
+      "get": {
+        "tags": ["Analytics"],
+        "summary": "Dependency-related blocking summary (FR-AN-09, G-09)",
+        "operationId": "getProjectDependencyBlocking",
+        "responses": {
+          "200": {
+            "description": "Dependency blocking",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/SuccessResponse" }, { "type": "object", "properties": { "data": { "type": "object", "additionalProperties": true } } }] } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/analytics/projects/{projectId}/risks": {
+      "parameters": [{ "$ref": "#/components/parameters/ProjectIdParam" }],
+      "get": {
+        "tags": ["Analytics"],
+        "summary": "Project risk trends (FR-AN-10, G-09)",
+        "operationId": "getProjectRiskTrends",
+        "parameters": [{ "name": "weeks", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 52, "default": 8 } }],
+        "responses": {
+          "200": {
+            "description": "Risk trends",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/SuccessResponse" }, { "type": "object", "properties": { "data": { "type": "object", "additionalProperties": true } } }] } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/audit": {
+      "get": {
+        "tags": ["Audit"],
+        "summary": "Query audit trail (Admin global; PM project-scoped — FR-AUD-01..06, G-08)",
+        "operationId": "listAuditLogs",
+        "parameters": [
+          { "$ref": "#/components/parameters/PageParam" },
+          { "$ref": "#/components/parameters/LimitParam" },
+          { "name": "entityType", "in": "query", "schema": { "type": "string" } },
+          { "name": "entityId", "in": "query", "schema": { "type": "string", "format": "uuid" } },
+          { "name": "actorId", "in": "query", "schema": { "type": "string", "format": "uuid" } },
+          { "name": "projectId", "in": "query", "schema": { "type": "string", "format": "uuid" } },
+          { "name": "correlationId", "in": "query", "schema": { "type": "string", "format": "uuid" } },
+          { "name": "action", "in": "query", "schema": { "type": "string", "enum": ["CREATE", "UPDATE", "DELETE"] } },
+          { "name": "from", "in": "query", "schema": { "type": "string", "format": "date-time" } },
+          { "name": "to", "in": "query", "schema": { "type": "string", "format": "date-time" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Audit entries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessResponse" },
+                    { "type": "object", "properties": { "data": { "type": "array", "items": { "$ref": "#/components/schemas/AuditLog" } }, "meta": { "$ref": "#/components/schemas/PaginationMeta" } } }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/audit/{auditId}": {
+      "parameters": [{ "name": "auditId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+      "get": {
+        "tags": ["Audit"],
+        "summary": "Get a single audit record",
+        "operationId": "getAuditLog",
+        "responses": {
+          "200": {
+            "description": "Audit entry",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/SuccessResponse" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/AuditLog" } } }] } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/risks": {
+      "get": {
+        "tags": ["PIRAE"],
+        "summary": "List risk assessments (FR-PIRAE-07)",
+        "operationId": "listRisks",
+        "parameters": [
+          { "$ref": "#/components/parameters/PageParam" },
+          { "$ref": "#/components/parameters/LimitParam" },
+          { "name": "projectId", "in": "query", "schema": { "type": "string", "format": "uuid" } },
+          { "name": "riskType", "in": "query", "schema": { "$ref": "#/components/schemas/RiskType" } },
+          { "name": "severity", "in": "query", "schema": { "$ref": "#/components/schemas/Severity" } },
+          { "name": "status", "in": "query", "schema": { "type": "string", "enum": ["Open", "Resolved"] } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Risks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessResponse" },
+                    { "type": "object", "properties": { "data": { "type": "array", "items": { "$ref": "#/components/schemas/RiskAssessment" } }, "meta": { "$ref": "#/components/schemas/PaginationMeta" } } }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/risks/projects/{projectId}": {
+      "parameters": [{ "$ref": "#/components/parameters/ProjectIdParam" }],
+      "get": {
+        "tags": ["PIRAE"],
+        "summary": "Latest risk snapshot for a project (FR-PIRAE-07)",
+        "operationId": "getProjectRisks",
+        "responses": {
+          "200": {
+            "description": "Risks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessResponse" },
+                    { "type": "object", "properties": { "data": { "type": "array", "items": { "$ref": "#/components/schemas/RiskAssessment" } } } }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/risks/{riskId}": {
+      "parameters": [{ "name": "riskId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+      "get": {
+        "tags": ["PIRAE"],
+        "summary": "Get single risk assessment",
+        "operationId": "getRisk",
+        "responses": {
+          "200": {
+            "description": "Risk",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/SuccessResponse" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/RiskAssessment" } } }] } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/risks/{riskId}/resolve": {
+      "parameters": [{ "name": "riskId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+      "patch": {
+        "tags": ["PIRAE"],
+        "summary": "Mark risk resolved (FR-PIRAE-08). Advisory only.",
+        "description": "Does NOT modify project state. Human decision only. PIRAE remains advisory (§4.13 decision boundary).",
+        "operationId": "resolveRisk",
+        "responses": {
+          "200": {
+            "description": "Resolved",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/SuccessResponse" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/RiskAssessment" } } }] } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "description": "Risk already resolved" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "Short-lived access JWT (15 min). Obtained via POST /auth/login. JTI blacklisted on logout (FR-AUTH-11, CA-06)."
+      }
+    },
+    "parameters": {
+      "PageParam": { "name": "page", "in": "query", "schema": { "type": "integer", "minimum": 1, "default": 1 } },
+      "LimitParam": { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 } },
+      "UserIdParam": { "name": "userId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+      "TeamIdParam": { "name": "teamId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+      "ProjectIdParam": { "name": "projectId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+      "TaskIdParam": { "name": "taskId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+      "CommentIdParam": { "name": "commentId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+      "NotificationIdParam": { "name": "notificationId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+      "AttachmentIdParam": { "name": "attachmentId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+    },
+    "responses": {
+      "NoContentSuccess": {
+        "description": "Operation successful",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NoContentSuccess" } } }
+      },
+      "Unauthorized": { "description": "Missing/invalid/blacklisted token (HTTP 401)", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+      "Forbidden": { "description": "Authenticated but not authorized (HTTP 403)", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+      "NotFound": { "description": "Resource not found (HTTP 404)", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+      "Conflict": { "description": "State conflict (HTTP 409)", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+      "ValidationError": { "description": "Zod validation failed (HTTP 422) — NFR-SEC-03", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+      "RateLimited": { "description": "Rate limit exceeded (HTTP 429) — 100 req / 15 min", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
+    },
+    "schemas": {
+      "SuccessResponse": {
+        "type": "object",
+        "required": ["success"],
+        "properties": { "success": { "type": "boolean", "const": true } }
+      },
+      "NoContentSuccess": {
+        "type": "object",
+        "required": ["success", "data"],
+        "properties": { "success": { "type": "boolean", "const": true }, "data": { "type": "object", "additionalProperties": true } }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "required": ["success", "error"],
+        "properties": {
+          "success": { "type": "boolean", "const": false },
+          "error": {
+            "type": "object",
+            "required": ["code", "message"],
+            "properties": {
+              "code": { "type": "string", "example": "TASK_NOT_FOUND" },
+              "message": { "type": "string", "example": "Task does not exist." }
+            }
+          }
+        }
+      },
+      "PaginationMeta": {
+        "type": "object",
+        "required": ["page", "limit", "total", "totalPages"],
+        "properties": {
+          "page": { "type": "integer", "example": 1 },
+          "limit": { "type": "integer", "example": 20 },
+          "total": { "type": "integer", "example": 150 },
+          "totalPages": { "type": "integer", "example": 8 }
+        }
+      },
+      "GlobalRole": { "type": "string", "enum": ["Administrator", "Project Manager", "Team Member", "Viewer"] },
+      "TeamRole": { "type": "string", "enum": ["Admin-Assigned", "Member"] },
+      "ProjectRole": { "type": "string", "enum": ["Manager", "Contributor", "Viewer"] },
+      "TaskStatus": { "type": "string", "enum": ["TODO", "IN_PROGRESS", "DONE"], "description": "CA-01 frozen three-column Kanban status" },
+      "Priority": { "type": "string", "enum": ["LOW", "MEDIUM", "HIGH", "CRITICAL"], "description": "CA-09 frozen priority enum" },
+      "ProjectStatus": { "type": "string", "enum": ["Active", "OnHold", "Completed", "Archived"] },
+      "RiskType": { "type": "string", "enum": ["WORKLOAD", "DELAY", "DEPENDENCY", "PRIORITY"] },
+      "Severity": { "type": "string", "enum": ["Low", "Medium", "High", "Critical"] },
+      "DigestFrequency": { "type": "string", "enum": ["daily", "weekly"] },
+      "LoginRequest": {
+        "type": "object",
+        "required": ["email", "password"],
+        "properties": {
+          "email": { "type": "string", "format": "email" },
+          "password": { "type": "string", "minLength": 8 }
+        }
+      },
+      "LogoutRequest": {
+        "type": "object",
+        "required": ["refreshToken"],
+        "properties": {
+          "refreshToken": { "type": "string", "minLength": 32 }
+        }
+      },
+      "TokenPair": {
+        "type": "object",
+        "required": ["accessToken", "refreshToken", "expiresIn"],
+        "properties": {
+          "accessToken": { "type": "string" },
+          "refreshToken": { "type": "string" },
+          "expiresIn": { "type": "integer", "description": "Access token lifetime in seconds (900 = 15 min)", "example": 900 }
+        }
+      },
+      "ChangePasswordRequest": {
+        "type": "object",
+        "required": ["currentPassword", "newPassword"],
+        "properties": {
+          "currentPassword": { "type": "string", "minLength": 8 },
+          "newPassword": { "type": "string", "minLength": 8, "pattern": "^(?=.*[a-z])(?=.*[A-Z])(?=.*\\d)(?=.*[^A-Za-z0-9]).{8,}$" }
+        }
+      },
+      "UpdateProfileRequest": {
+        "type": "object",
+        "properties": {
+          "fullName": { "type": "string", "maxLength": 100 },
+          "configuredCapacityHours": { "type": "integer", "minimum": 10, "maximum": 80 }
+        },
+        "additionalProperties": false
+      },
+      "User": {
+        "type": "object",
+        "required": ["id", "email", "fullName", "globalRole", "isActive", "createdAt"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "email": { "type": "string", "format": "email" },
+          "fullName": { "type": "string" },
+          "globalRole": { "$ref": "#/components/schemas/GlobalRole" },
+          "configuredCapacityHours": { "type": "integer", "minimum": 10, "maximum": 80, "default": 40 },
+          "isActive": { "type": "boolean" },
+          "lastLoginAt": { "type": ["string", "null"], "format": "date-time" },
+          "createdAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "CreateUserRequest": {
+        "type": "object",
+        "required": ["email", "password", "fullName", "globalRole"],
+        "properties": {
+          "email": { "type": "string", "format": "email", "maxLength": 255 },
+          "password": { "type": "string", "minLength": 8, "pattern": "^(?=.*[a-z])(?=.*[A-Z])(?=.*\\d)(?=.*[^A-Za-z0-9]).{8,}$" },
+          "fullName": { "type": "string", "maxLength": 100 },
+          "globalRole": { "$ref": "#/components/schemas/GlobalRole" },
+          "configuredCapacityHours": { "type": "integer", "minimum": 10, "maximum": 80, "default": 40 }
+        }
+      },
+      "Team": {
+        "type": "object",
+        "required": ["id", "name", "createdAt"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "name": { "type": "string" },
+          "description": { "type": ["string", "null"] },
+          "createdAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "CreateTeamRequest": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string", "maxLength": 100 },
+          "description": { "type": ["string", "null"] }
+        }
+      },
+      "UpdateTeamRequest": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string", "maxLength": 100 },
+          "description": { "type": ["string", "null"] }
+        },
+        "additionalProperties": false
+      },
+      "TeamMember": {
+        "type": "object",
+        "required": ["teamId", "userId", "role", "assignedAt"],
+        "properties": {
+          "teamId": { "type": "string", "format": "uuid" },
+          "userId": { "type": "string", "format": "uuid" },
+          "user": { "$ref": "#/components/schemas/User" },
+          "role": { "$ref": "#/components/schemas/TeamRole" },
+          "assignedBy": { "type": ["string", "null"], "format": "uuid" },
+          "assignedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "AddTeamMemberRequest": {
+        "type": "object",
+        "required": ["userId"],
+        "properties": {
+          "userId": { "type": "string", "format": "uuid" },
+          "role": { "$ref": "#/components/schemas/TeamRole", "default": "Member" }
+        }
+      },
+      "ProjectMember": {
+        "type": "object",
+        "required": ["projectId", "userId", "role"],
+        "properties": {
+          "projectId": { "type": "string", "format": "uuid" },
+          "userId": { "type": "string", "format": "uuid" },
+          "user": { "$ref": "#/components/schemas/User" },
+          "role": { "$ref": "#/components/schemas/ProjectRole" }
+        }
+      },
+      "AddProjectMemberRequest": {
+        "type": "object",
+        "required": ["userId", "role"],
+        "properties": {
+          "userId": { "type": "string", "format": "uuid" },
+          "role": { "$ref": "#/components/schemas/ProjectRole" }
+        }
+      },
+      "UpdateProjectMemberRoleRequest": {
+        "type": "object",
+        "required": ["role"],
+        "properties": { "role": { "$ref": "#/components/schemas/ProjectRole" } }
+      },
+      "Project": {
+        "type": "object",
+        "required": ["id", "teamId", "title", "status", "priority"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "teamId": { "type": "string", "format": "uuid" },
+          "title": { "type": "string" },
+          "description": { "type": ["string", "null"] },
+          "status": { "$ref": "#/components/schemas/ProjectStatus" },
+          "priority": { "$ref": "#/components/schemas/Priority" },
+          "startDate": { "type": ["string", "null"], "format": "date-time", "description": "FR-PROJ-02" },
+          "endDate": { "type": ["string", "null"], "format": "date-time", "description": "FR-PROJ-02 (formerly deadline)" },
+          "deadline": { "type": ["string", "null"], "format": "date-time" },
+          "createdAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "CreateProjectRequest": {
+        "type": "object",
+        "required": ["teamId", "title"],
+        "properties": {
+          "teamId": { "type": "string", "format": "uuid" },
+          "title": { "type": "string", "maxLength": 150 },
+          "description": { "type": ["string", "null"] },
+          "priority": { "$ref": "#/components/schemas/Priority" },
+          "startDate": { "type": ["string", "null"], "format": "date-time" },
+          "endDate": { "type": ["string", "null"], "format": "date-time" },
+          "deadline": { "type": ["string", "null"], "format": "date-time" }
+        }
+      },
+      "UpdateProjectRequest": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string", "maxLength": 150 },
+          "description": { "type": ["string", "null"] },
+          "status": { "$ref": "#/components/schemas/ProjectStatus" },
+          "priority": { "$ref": "#/components/schemas/Priority" },
+          "startDate": { "type": ["string", "null"], "format": "date-time" },
+          "endDate": { "type": ["string", "null"], "format": "date-time" },
+          "deadline": { "type": ["string", "null"], "format": "date-time" }
+        },
+        "additionalProperties": false
+      },
+      "ProjectProgress": {
+        "type": "object",
+        "properties": {
+          "projectId": { "type": "string", "format": "uuid" },
+          "totalTasks": { "type": "integer" },
+          "completedTasks": { "type": "integer" },
+          "overdueTasks": { "type": "integer" },
+          "completionPercentage": { "type": "number", "minimum": 0, "maximum": 100 }
+        }
+      },
+      "Subtask": {
+        "type": "object",
+        "required": ["title", "done"],
+        "properties": {
+          "title": { "type": "string" },
+          "done": { "type": "boolean" }
+        }
+      },
+      "AddSubtaskRequest": {
+        "type": "object",
+        "required": ["title"],
+        "properties": {
+          "title": { "type": "string", "maxLength": 200 },
+          "done": { "type": "boolean", "default": false }
+        }
+      },
+      "Task": {
+        "type": "object",
+        "required": ["id", "projectId", "title", "status", "priority"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "projectId": { "type": "string", "format": "uuid" },
+          "title": { "type": "string" },
+          "description": { "type": ["string", "null"] },
+          "status": { "$ref": "#/components/schemas/TaskStatus" },
+          "priority": { "$ref": "#/components/schemas/Priority" },
+          "dueDate": { "type": ["string", "null"], "format": "date-time" },
+          "startDate": { "type": ["string", "null"], "format": "date-time" },
+          "estimatedEffort": { "type": "number", "minimum": 0 },
+          "subtasks": { "type": "array", "items": { "$ref": "#/components/schemas/Subtask" } },
+          "assigneeIds": { "type": "array", "items": { "type": "string", "format": "uuid" } },
+          "completedAt": { "type": ["string", "null"], "format": "date-time" },
+          "firstCompletedAt": { "type": ["string", "null"], "format": "date-time" },
+          "createdAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "CreateTaskRequest": {
+        "type": "object",
+        "required": ["title"],
+        "properties": {
+          "title": { "type": "string", "maxLength": 200 },
+          "description": { "type": ["string", "null"] },
+          "status": { "$ref": "#/components/schemas/TaskStatus", "default": "TODO" },
+          "priority": { "$ref": "#/components/schemas/Priority", "default": "MEDIUM" },
+          "dueDate": { "type": ["string", "null"], "format": "date-time" },
+          "startDate": { "type": ["string", "null"], "format": "date-time" },
+          "estimatedEffort": { "type": "number", "minimum": 0, "default": 0 },
+          "assigneeIds": { "type": "array", "items": { "type": "string", "format": "uuid" } }
+        }
+      },
+      "UpdateTaskRequest": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string", "maxLength": 200 },
+          "description": { "type": ["string", "null"] },
+          "priority": { "$ref": "#/components/schemas/Priority" },
+          "dueDate": { "type": ["string", "null"], "format": "date-time" },
+          "startDate": { "type": ["string", "null"], "format": "date-time" },
+          "estimatedEffort": { "type": "number", "minimum": 0 }
+        },
+        "additionalProperties": false
+      },
+      "AssignTaskRequest": {
+        "type": "object",
+        "required": ["userId"],
+        "properties": { "userId": { "type": "string", "format": "uuid" } }
+      },
+      "TaskDependency": {
+        "type": "object",
+        "required": ["id", "blockingTaskId", "blockedTaskId", "type"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "blockingTaskId": { "type": "string", "format": "uuid" },
+          "blockedTaskId": { "type": "string", "format": "uuid" },
+          "type": { "type": "string", "enum": ["BLOCKS"] },
+          "createdAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "Comment": {
+        "type": "object",
+        "required": ["id", "taskId", "authorId", "body", "createdAt"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "taskId": { "type": "string", "format": "uuid" },
+          "authorId": { "type": "string", "format": "uuid" },
+          "body": { "type": "string" },
+          "mentions": { "type": "array", "items": { "type": "string", "format": "uuid" } },
+          "editableUntil": { "type": "string", "format": "date-time", "description": "BR-COL-02 — 15-minute edit window" },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": ["string", "null"], "format": "date-time" }
+        }
+      },
+      "Notification": {
+        "type": "object",
+        "required": ["id", "userId", "type", "payload", "createdAt"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "userId": { "type": "string", "format": "uuid" },
+          "type": { "type": "string" },
+          "payload": { "type": "object", "additionalProperties": true },
+          "readAt": { "type": ["string", "null"], "format": "date-time" },
+          "expiresAt": { "type": ["string", "null"], "format": "date-time" },
+          "createdAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "NotificationPreference": {
+        "type": "object",
+        "required": ["userId", "digestMode", "digestFrequency", "emailOptIn"],
+        "properties": {
+          "userId": { "type": "string", "format": "uuid" },
+          "digestMode": { "type": "boolean" },
+          "digestFrequency": { "$ref": "#/components/schemas/DigestFrequency" },
+          "emailOptIn": { "type": "boolean" },
+          "emailAddress": { "type": ["string", "null"], "format": "email" },
+          "updatedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "UpdateNotificationPreferenceRequest": {
+        "type": "object",
+        "properties": {
+          "digestMode": { "type": "boolean" },
+          "digestFrequency": { "$ref": "#/components/schemas/DigestFrequency" },
+          "emailOptIn": { "type": "boolean" },
+          "emailAddress": { "type": ["string", "null"], "format": "email" }
+        },
+        "additionalProperties": false
+      },
+      "Attachment": {
+        "type": "object",
+        "required": ["id", "storageKey", "mimeType", "fileSize", "uploadedBy", "createdAt"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "taskId": { "type": ["string", "null"], "format": "uuid" },
+          "commentId": { "type": ["string", "null"], "format": "uuid" },
+          "storageKey": { "type": "string" },
+          "originalFilename": { "type": "string" },
+          "mimeType": { "type": "string" },
+          "fileSize": { "type": "integer" },
+          "uploadedBy": { "type": "string", "format": "uuid" },
+          "createdAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "ProjectAnalytics": {
+        "type": "object",
+        "properties": {
+          "projectId": { "type": "string", "format": "uuid" },
+          "totalTasks": { "type": "integer" },
+          "completedTasks": { "type": "integer" },
+          "overdueTasks": { "type": "integer" },
+          "completionPercentage": { "type": "number" },
+          "statusDistribution": {
+            "type": "object",
+            "properties": { "TODO": { "type": "integer" }, "IN_PROGRESS": { "type": "integer" }, "DONE": { "type": "integer" } }
+          },
+          "priorityDistribution": {
+            "type": "object",
+            "properties": { "LOW": { "type": "integer" }, "MEDIUM": { "type": "integer" }, "HIGH": { "type": "integer" }, "CRITICAL": { "type": "integer" } }
+          }
+        }
+      },
+      "WorkloadEntry": {
+        "type": "object",
+        "properties": {
+          "userId": { "type": "string", "format": "uuid" },
+          "fullName": { "type": "string" },
+          "activeTaskCount": { "type": "integer" },
+          "estimatedActiveHours": { "type": "number" },
+          "configuredCapacityHours": { "type": "integer" },
+          "workloadRatio": { "type": "number" },
+          "overdueCount": { "type": "integer" },
+          "highPriorityActiveCount": { "type": "integer" }
+        }
+      },
+      "ProjectSnapshot": {
+        "type": "object",
+        "properties": {
+          "weekStart": { "type": "string", "format": "date-time" },
+          "tasksCreated": { "type": "integer" },
+          "tasksCompleted": { "type": "integer" },
+          "activeTasks": { "type": "integer" },
+          "totalEffortHours": { "type": "number" },
+          "completionVelocity": { "type": "number" }
+        }
+      },
+      "AuditLog": {
+        "type": "object",
+        "required": ["id", "entityType", "entityId", "action", "correlationId", "timestamp"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "actorId": { "type": ["string", "null"], "format": "uuid" },
+          "entityType": { "type": "string" },
+          "entityId": { "type": "string", "format": "uuid" },
+          "action": { "type": "string", "enum": ["CREATE", "UPDATE", "DELETE"] },
+          "oldValues": { "type": ["object", "null"], "additionalProperties": true },
+          "newValues": { "type": ["object", "null"], "additionalProperties": true },
+          "correlationId": { "type": "string", "format": "uuid" },
+          "projectId": { "type": ["string", "null"], "format": "uuid" },
+          "ipAddress": { "type": ["string", "null"] },
+          "userAgent": { "type": ["string", "null"] },
+          "timestamp": { "type": "string", "format": "date-time" }
+        }
+      },
+      "RiskAssessment": {
+        "type": "object",
+        "required": ["id", "projectId", "riskType", "riskScore", "severity", "reason", "recommendation", "status", "generatedAt"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "projectId": { "type": "string", "format": "uuid" },
+          "riskType": { "$ref": "#/components/schemas/RiskType" },
+          "riskScore": { "type": "integer", "minimum": 0, "maximum": 100 },
+          "severity": { "$ref": "#/components/schemas/Severity" },
+          "reason": { "type": "string" },
+          "recommendation": { "type": "string" },
+          "status": { "type": "string", "enum": ["Open", "Resolved"] },
+          "targetKey": { "type": ["string", "null"], "description": "Stable target identity, e.g. 'task:<uuid>' or 'user:<uuid>' (G-06)" },
+          "taskId": { "type": ["string", "null"], "format": "uuid", "description": "Target task for DELAY/DEPENDENCY/PRIORITY" },
+          "affectedUserId": { "type": ["string", "null"], "format": "uuid", "description": "Target user for WORKLOAD" },
+          "resolvedAt": { "type": ["string", "null"], "format": "date-time" },
+          "generatedAt": { "type": "string", "format": "date-time" }
+        }
+      }
+    }
+  },
+  "x-fyp-metadata": {
+    "baseline": "SRS 3.0",
+    "criticalDecisions": [
+      "CA-01 status enum = TODO, IN_PROGRESS, DONE",
+      "CA-04 admin-provisioned accounts only",
+      "CA-05 team creation = Administrator only",
+      "CA-06 access JWT (15m) + Redis refresh session + JTI blacklist",
+      "CA-07 13 real-time events over Socket.IO",
+      "CA-08 PIRAE async (BullMQ) + daily cron",
+      "CA-11 relational task_dependencies table",
+      "CA-14 4-level workload risk thresholds",
+      "CA-15 delay risk formula + >20% override",
+      "CA-18 unified permission matrix",
+      "CA-20 frozen NFRs"
+    ],
+    "realTimeContracts": {
+      "protocol": "Socket.IO over WSS",
+      "rooms": ["project:{projectId}", "user:{userId}"],
+      "events": [
+        "task.created",
+        "task.updated",
+        "task.status_changed",
+        "task.assigned",
+        "task.deleted",
+        "comment.created",
+        "comment.updated",
+        "comment.deleted",
+        "project.updated",
+        "notification.created",
+        "risk.detected",
+        "risk.updated",
+        "membership.changed"
+      ]
+    }
+  }
+}
